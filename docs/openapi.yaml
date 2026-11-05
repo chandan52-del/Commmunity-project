@@ -1,0 +1,16 @@
+# OWNER: Devin
+# Cursor must not fill real paths here. Devin must complete this contract
+# before frontend integration.
+openapi: 3.0.3
+info:
+  title: Community Hall Booking and Management System API
+  version: 0.0.0
+  description: >
+    Stub only (Phase 0). Devin owns this file and must document auth, halls,
+    bookings, admin, maintenance, and reports before Cursor integrates.
+servers:
+  - url: http://localhost:5000/api
+    description: Local development
+paths: {}
+components:
+  schemas: {}
