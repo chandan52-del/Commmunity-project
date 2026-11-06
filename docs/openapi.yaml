@@ -1,16 +1,1368 @@
 # OWNER: Devin
-# Cursor must not fill real paths here. Devin must complete this contract
-# before frontend integration.
-openapi: 3.0.3
+# API contract for Community Hall Booking and Management System V1.
+# Stack: Node.js + Express.js + MySQL 8 (mysql2), bcrypt, JWT.
+# All timestamps are ISO 8601 UTC (e.g. 2026-11-06T14:30:00.000Z).
+# Money is DECIMAL(10,2); all amounts are in the organization's default currency (no payments in V1).
+openapi: 3.1.0
 info:
   title: Community Hall Booking and Management System API
-  version: 0.0.0
-  description: >
-    Stub only (Phase 0). Devin owns this file and must document auth, halls,
-    bookings, admin, maintenance, and reports before Cursor integrates.
+  version: 1.0.0
+  description: |
+    V1 API for discovering community halls, checking availability, submitting
+    booking requests (admin-approved), managing bookings, scheduling
+    maintenance, and viewing admin dashboards and reports.
+
+    ## Conventions
+    - Base URL: `http://localhost:5000/api`
+    - All request/response bodies are JSON (`application/json`).
+    - All datetimes are ISO 8601 in **UTC**. Clients must send UTC; the server
+      never interprets naive local times.
+    - Successful single-resource responses use `{ "data": ... }`.
+    - List responses use `{ "data": [...], "pagination": {...} }`.
+    - Errors use `{ "error": { "code", "message", "details" } }` — see `Error`.
+    - Refresh tokens are delivered only via an `HttpOnly` `Set-Cookie` header
+      and are never returned in response bodies.
+    - Password hashes and internal fields are never exposed.
+
+    ## Business rules
+    - Booking statuses: `pending`, `approved`, `rejected`, `cancelled`, `completed`.
+    - Only `approved` bookings and `scheduled`/`in_progress` maintenance block
+      availability. `pending` bookings never block the calendar.
+    - Approval re-checks conflicts inside a MySQL transaction with row locking
+      (`SELECT ... FOR UPDATE`); conflicts return `409 BOOKING_CONFLICT`.
+    - Overlap is half-open: `[start_at, end_at)`.
+    - Customers can only read/cancel their own bookings; only admins can manage
+      halls, approve/reject bookings, and manage maintenance.
 servers:
   - url: http://localhost:5000/api
     description: Local development
-paths: {}
+
+tags:
+  - name: Auth
+    description: Registration, login, token refresh, logout, current user.
+  - name: Halls
+    description: Public hall catalogue (read-only for customers).
+  - name: Admin Halls
+    description: Hall management (admin only).
+  - name: Availability
+    description: Hall availability and busy ranges.
+  - name: Bookings
+    description: Customer booking requests and history.
+  - name: Admin Bookings
+    description: Booking approval workflow (admin only).
+  - name: Maintenance
+    description: Maintenance window management (admin only).
+  - name: Dashboard & Reports
+    description: Admin analytics (admin only).
+
+paths:
+  # ─────────────────────────────── AUTH ───────────────────────────────
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new customer account
+      description: Creates a `customer` user. Returns access token; refresh token is set as an HttpOnly cookie.
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+            example:
+              full_name: Priya Sharma
+              email: priya@example.com
+              phone: "+1-555-0100"
+              password: "Str0ng!Pass"
+      responses:
+        '201':
+          description: Account created
+          headers:
+            Set-Cookie:
+              description: HttpOnly refresh token cookie (`refresh_token`, Path=/api/auth, SameSite=Strict)
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AuthTokens' }
+              example:
+                data:
+                  user: { id: 42, full_name: Priya Sharma, email: priya@example.com, phone: "+1-555-0100", role: customer, status: active }
+                  access_token: eyJhbGciOi...
+                  token_type: Bearer
+                  expires_in: 1800
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in with email and password
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+            example: { email: priya@example.com, password: "Str0ng!Pass" }
+      responses:
+        '200':
+          description: Authenticated
+          headers:
+            Set-Cookie:
+              description: HttpOnly refresh token cookie
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AuthTokens' }
+              example:
+                data:
+                  user: { id: 42, full_name: Priya Sharma, email: priya@example.com, role: customer, status: active }
+                  access_token: eyJhbGciOi...
+                  token_type: Bearer
+                  expires_in: 1800
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate refresh token and issue a new access token
+      description: Reads the `refresh_token` HttpOnly cookie, validates it, rotates it (old token revoked), and returns a new access token. No request body.
+      operationId: refreshToken
+      security: []
+      responses:
+        '200':
+          description: New access token issued; new refresh cookie set
+          headers:
+            Set-Cookie:
+              description: Rotated HttpOnly refresh token cookie
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [access_token, token_type, expires_in]
+                    properties:
+                      access_token: { type: string }
+                      token_type: { type: string, example: Bearer }
+                      expires_in: { type: integer, example: 1800 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out — revoke refresh token and clear cookie
+      operationId: logout
+      security: []
+      responses:
+        '204': { description: Logged out; refresh cookie cleared via Set-Cookie }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Get the current authenticated user
+      operationId: getMe
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/User' }
+              example:
+                data: { id: 42, full_name: Priya Sharma, email: priya@example.com, phone: "+1-555-0100", role: customer, status: active, created_at: "2026-11-01T09:00:00.000Z" }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ─────────────────────────────── HALLS ───────────────────────────────
+  /halls:
+    get:
+      tags: [Halls]
+      summary: List active halls
+      description: Public catalogue. Only `status=active` halls are returned. Supports pagination, search, and filters.
+      operationId: listHalls
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: search
+          in: query
+          description: Case-insensitive match on name, location, or description
+          schema: { type: string, maxLength: 120 }
+        - name: location
+          in: query
+          schema: { type: string, maxLength: 255 }
+        - name: min_capacity
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: max_capacity
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: sort
+          in: query
+          description: "Sort field; prefix `-` for descending. Allowed: `name`, `capacity`, `base_price`, `created_at`."
+          schema: { type: string, default: name, example: -capacity }
+      responses:
+        '200':
+          description: Paginated hall list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HallListResponse' }
+              example:
+                data:
+                  - id: 1
+                    name: Riverside Grand Hall
+                    slug: riverside-grand-hall
+                    description: Pillar-free hall with river views
+                    location: Riverside District
+                    capacity: 300
+                    base_price: "850.00"
+                    status: active
+                    cover_image_url: https://example.com/halls/riverside.jpg
+                    amenities: [Stage, Sound system, Bridal room]
+                    created_at: "2026-10-01T00:00:00.000Z"
+                pagination: { page: 1, page_size: 20, total: 1, total_pages: 1 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /halls/{id}:
+    get:
+      tags: [Halls]
+      summary: Get hall details
+      description: Returns a single hall with amenities and images. `id` may be numeric id or slug.
+      operationId: getHall
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Hall detail
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/HallDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /admin/halls:
+    post:
+      tags: [Admin Halls]
+      summary: Create a hall (admin)
+      operationId: createHall
+      security: [{ bearerAuth: [] }]
+      x-required-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HallInput' }
+            example:
+              name: Riverside Grand Hall
+              description: Pillar-free hall with river views
+              location: Riverside District
+              capacity: 300
+              base_price: 850.00
+              cover_image_url: https://example.com/halls/riverside.jpg
+              amenities: [Stage, Sound system]
+      responses:
+        '201':
+          description: Hall created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/HallDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /admin/halls/{id}:
+    patch:
+      tags: [Admin Halls]
+      summary: Update a hall (admin)
+      operationId: updateHall
+      security: [{ bearerAuth: [] }]
+      x-required-role: admin
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HallInput' }
+      responses:
+        '200':
+          description: Hall updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/HallDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      tags: [Admin Halls]
+      summary: Deactivate a hall (admin)
+      description: Soft delete — sets `status` to `inactive`. Halls with future approved bookings cannot be deleted (409).
+      operationId: deleteHall
+      security: [{ bearerAuth: [] }]
+      x-required-role: admin
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '204': { description: Hall deactivated }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ──────────────────────────── AVAILABILITY ───────────────────────────
+  /halls/{id}/availability:
+    get:
+      tags: [Availability]
+      summary: Get busy ranges for a hall in a date window
+      description: |
+        Returns time ranges where the hall is NOT bookable, computed as the union of:
+        - `approved` bookings overlapping `[from, to)`
+        - `scheduled` or `in_progress` maintenance windows overlapping `[from, to)`
+
+        `pending` bookings are ignored for blocking.
+      operationId: getHallAvailability
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: from
+          in: query
+          required: true
+          description: Window start (UTC ISO 8601), inclusive
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          description: Window end (UTC ISO 8601), exclusive. Max range 366 days.
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Busy ranges and hall status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [hall_id, hall_status, busy_ranges]
+                    properties:
+                      hall_id: { type: integer, format: int64 }
+                      hall_status: { type: string, enum: [active, inactive, maintenance] }
+                      busy_ranges:
+                        type: array
+                        items: { $ref: '#/components/schemas/BusyRange' }
+              example:
+                data:
+                  hall_id: 1
+                  hall_status: active
+                  busy_ranges:
+                    - start: "2026-12-05T18:00:00.000Z"
+                      end: "2026-12-06T02:00:00.000Z"
+                      type: booking
+                      booking_id: 1042
+                    - start: "2026-12-10T08:00:00.000Z"
+                      end: "2026-12-10T12:00:00.000Z"
+                      type: maintenance
+                      maintenance_id: 7
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ──────────────────────────── BOOKINGS ────────────────────────────
+  /bookings:
+    post:
+      tags: [Bookings]
+      summary: Submit a booking request (customer)
+      description: |
+        Creates a `pending` booking. Returns `409 BOOKING_CONFLICT` if an
+        `approved` booking or active maintenance already overlaps the requested
+        range. Overlapping *pending* requests are allowed — conflicts are
+        resolved at admin approval time.
+      operationId: createBooking
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BookingCreate' }
+            example:
+              hall_id: 1
+              event_name: Sharma Wedding Reception
+              event_type: wedding
+              start_at: "2026-12-05T18:00:00.000Z"
+              end_at: "2026-12-06T02:00:00.000Z"
+              guest_count: 250
+              customer_notes: Prefer early access for decorators
+      responses:
+        '201':
+          description: Booking request created (status `pending`)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Booking' }
+              example:
+                data:
+                  id: 1042
+                  booking_ref: CH-2026-01042
+                  user_id: 42
+                  hall_id: 1
+                  hall_name: Riverside Grand Hall
+                  event_name: Sharma Wedding Reception
+                  event_type: wedding
+                  start_at: "2026-12-05T18:00:00.000Z"
+                  end_at: "2026-12-06T02:00:00.000Z"
+                  guest_count: 250
+                  quoted_amount: "850.00"
+                  status: pending
+                  customer_notes: Prefer early access for decorators
+                  created_at: "2026-11-06T10:15:00.000Z"
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/BookingConflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    get:
+      tags: [Bookings]
+      summary: List the current customer's bookings
+      description: Customers always see only their own bookings. Admins may pass `user_id` to list a specific customer's bookings.
+      operationId: listMyBookings
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/BookingStatus' }
+        - name: hall_id
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: from
+          in: query
+          description: Filter bookings overlapping/starting on or after this UTC datetime
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: Filter bookings starting before this UTC datetime
+          schema: { type: string, format: date-time }
+        - name: sort
+          in: query
+          description: Allowed values `start_at`, `-start_at` (default), `created_at`, `-created_at`, `status`.
+          schema: { type: string, default: -start_at }
+      responses:
+        '200':
+          description: Paginated booking list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BookingListResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /bookings/{id}:
+    get:
+      tags: [Bookings]
+      summary: Get a booking
+      description: Customers may only read their own bookings; admins may read any.
+      operationId: getBooking
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Booking detail (includes `events` audit trail)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/BookingDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /bookings/{id}/cancel:
+    patch:
+      tags: [Bookings]
+      summary: Cancel own booking (customer) or any booking (admin)
+      description: Allowed from `pending` or `approved`. Terminal states (`rejected`, `cancelled`, `completed`) cannot be cancelled (409).
+      operationId: cancelBooking
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 500 }
+      responses:
+        '200':
+          description: Booking cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Booking' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ──────────────────────────── ADMIN BOOKINGS ────────────────────────────
+  /admin/bookings:
+    get:
+      tags: [Admin Bookings]
+      summary: List all bookings (admin)
+      description: Full queue with filters for the approval workflow.
+      operationId: adminListBookings
+      security: [{ bearerAuth: [] }]
+      x-required-role: admin
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/BookingStatus' }
+        - name: hall_id
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: user_id
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: search
+          in: query
+          description: Match on booking_ref, event_name, or customer name/email
+          schema: { type: string, maxLength: 120 }
+        - name: sort
+          in: query
+          description: Allowed values `start_at`, `-start_at` (default), `created_at`, `-created_at` (pending queue), `status`.
+          schema: { type: string, default: -created_at }
+      responses:
+        '200':
+          description: Paginated admin booking list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminBookingListResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /admin/bookings/{id}/approve:
+    patch:
+      tags: [Admin Bookings]
+      summary: Approve a pending booking (admin)
+      description: |
+        Sets status `pending → approved`. Inside a MySQL transaction with row
+        locking, the server re-checks overlaps against `approved` bookings and
+        `scheduled`/`in_progress` maintenance. On conflict the transaction
+        rolls back and returns `409 BOOKING_CONFLICT` with conflict details.
+        Only `pending` bookings may be approved (409 otherwise).
+      operationId: approveBooking
+      security: [{ bearerAuth: [] }]
+      x-required-role: admin
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                admin_notes: { type: string, maxLength: 1000 }
+      responses:
+        '200':
+          description: Booking approved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/BookingDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/BookingConflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /admin/bookings/{id}/reject:
+    patch:
+      tags: [Admin Bookings]
+      summary: Reject a pending booking (admin)
+      operationId: rejectBooking
+      security: [{ bearerAuth: [] }]
+      x-required-role: admin
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                admin_notes:
+                  type: string
+                  maxLength: 1000
+                  description: Recommended — shown to the customer as the rejection reason
+      responses:
+        '200':
+          description: Booking rejected
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/BookingDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ───────────────────────────── MAINTENANCE ─────────────────────────────
+  /admin/maintenance:
+    get:
+      tags: [Maintenance]
+      summary: List maintenance windows (admin)
+      operationId: listMaintenance
+      security: [{ bearerAuth: [] }]
+      x-required-role: admin
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: hall_id
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/MaintenanceStatus' }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - name: sort
+          in: query
+          description: Allowed values `start_at`, `-start_at` (default), `created_at`, `-created_at`.
+          schema: { type: string, default: -start_at }
+      responses:
+        '200':
+          description: Paginated maintenance list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MaintenanceListResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      tags: [Maintenance]
+      summary: Schedule a maintenance window (admin)
+      description: Creating a `scheduled` or `in_progress` window that overlaps approved bookings is allowed but is flagged via `conflicts` in the response; the admin should review. Returns 409 only if `hall_id` does not exist.
+      operationId: createMaintenance
+      security: [{ bearerAuth: [] }]
+      x-required-role: admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MaintenanceInput' }
+            example:
+              hall_id: 1
+              title: HVAC servicing
+              reason: Quarterly air-conditioning maintenance
+              start_at: "2026-12-10T08:00:00.000Z"
+              end_at: "2026-12-10T12:00:00.000Z"
+              status: scheduled
+      responses:
+        '201':
+          description: Maintenance window created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/MaintenanceWindow' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /admin/maintenance/{id}:
+    patch:
+      tags: [Maintenance]
+      summary: Update or transition a maintenance window (admin)
+      description: Allowed transitions — `scheduled → in_progress → completed`, any non-terminal state → `cancelled`. Overlapping an approved booking when moving to `scheduled`/`in_progress` returns 409.
+      operationId: updateMaintenance
+      security: [{ bearerAuth: [] }]
+      x-required-role: admin
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MaintenanceInput' }
+      responses:
+        '200':
+          description: Maintenance window updated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/MaintenanceWindow' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    delete:
+      tags: [Maintenance]
+      summary: Cancel a maintenance window (admin)
+      description: Sets status `cancelled`. Only `scheduled`/`in_progress` windows may be cancelled.
+      operationId: cancelMaintenance
+      security: [{ bearerAuth: [] }]
+      x-required-role: admin
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '204': { description: Maintenance window cancelled }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  # ────────────────────────── DASHBOARD & REPORTS ──────────────────────────
+  /admin/dashboard:
+    get:
+      tags: [Dashboard & Reports]
+      summary: Admin dashboard summary
+      description: Aggregate counts for the admin landing view. No date filters; reflects current state.
+      operationId: getDashboard
+      security: [{ bearerAuth: [] }]
+      x-required-role: admin
+      responses:
+        '200':
+          description: Dashboard metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/DashboardStats' }
+              example:
+                data:
+                  halls: { total: 8, active: 6, inactive: 1, maintenance: 1 }
+                  users: { total: 143, customers: 140, admins: 3 }
+                  bookings:
+                    pending: 5
+                    approved: 62
+                    rejected: 11
+                    cancelled: 9
+                    completed: 140
+                  upcoming_approved_bookings: 7
+                  pending_requests: 5
+                  active_maintenance_windows: 2
+                  estimated_revenue: "52800.00"
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /admin/reports:
+    get:
+      tags: [Dashboard & Reports]
+      summary: Booking reports and analytics
+      description: Aggregated report over a date range (based on `start_at`). Supports per-hall, per-status, and monthly breakdowns.
+      operationId: getReports
+      security: [{ bearerAuth: [] }]
+      x-required-role: admin
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Range start (UTC ISO 8601, inclusive)
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          required: true
+          description: Range end (UTC ISO 8601, exclusive). Max range 366 days.
+          schema: { type: string, format: date-time }
+        - name: hall_id
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: group_by
+          in: query
+          description: Breakdown dimension
+          schema:
+            type: string
+            enum: [status, hall, month]
+            default: status
+      responses:
+        '200':
+          description: Report data
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Report' }
+              example:
+                data:
+                  range: { from: "2026-10-01T00:00:00.000Z", to: "2026-11-01T00:00:00.000Z" }
+                  totals:
+                    bookings: 34
+                    approved: 21
+                    pending: 5
+                    rejected: 4
+                    cancelled: 3
+                    completed: 18
+                    quoted_amount_total: "18250.00"
+                  breakdown:
+                    - key: approved
+                      label: Approved
+                      count: 21
+                      quoted_amount: "14700.00"
+                    - key: pending
+                      label: Pending
+                      count: 5
+                      quoted_amount: "3500.00"
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
 components:
-  schemas: {}
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Short-lived JWT access token (15–60 min) obtained from `/auth/login` or `/auth/register`.
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: refresh_token
+      description: HttpOnly, Secure, SameSite=Strict refresh token cookie. Rotated on every `/auth/refresh` call; never exposed in response bodies.
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      description: 1-based page number
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: page_size
+      in: query
+      description: Items per page (max 100)
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+  responses:
+    BadRequest:
+      description: Validation or malformed request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Request validation failed
+              details:
+                - field: end_at
+                  message: must be after start_at
+    Unauthorized:
+      description: Missing, expired, or invalid credentials
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error: { code: UNAUTHORIZED, message: Authentication required or token expired }
+    Forbidden:
+      description: Authenticated but insufficient role/permission
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error: { code: FORBIDDEN, message: Admin role required }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error: { code: NOT_FOUND, message: Hall not found }
+    Conflict:
+      description: State conflict (duplicate, invalid transition, or blocked resource)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error: { code: CONFLICT, message: A user with this email already exists }
+    BookingConflict:
+      description: Requested time range conflicts with an approved booking or active maintenance
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              code: BOOKING_CONFLICT
+              message: The requested time range overlaps an existing approved booking or maintenance window
+              details:
+                - type: booking
+                  id: 1042
+                  start_at: "2026-12-05T18:00:00.000Z"
+                  end_at: "2026-12-06T02:00:00.000Z"
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error: { code: INTERNAL_ERROR, message: An unexpected error occurred }
+
+  schemas:
+    # ── primitives ──
+    BookingStatus:
+      type: string
+      enum: [pending, approved, rejected, cancelled, completed]
+    MaintenanceStatus:
+      type: string
+      enum: [scheduled, in_progress, completed, cancelled]
+    UserRole:
+      type: string
+      enum: [customer, admin]
+    UserStatus:
+      type: string
+      enum: [active, inactive]
+    HallStatus:
+      type: string
+      enum: [active, inactive, maintenance]
+    Pagination:
+      type: object
+      required: [page, page_size, total, total_pages]
+      properties:
+        page: { type: integer, example: 1 }
+        page_size: { type: integer, example: 20 }
+        total: { type: integer, format: int64, example: 143 }
+        total_pages: { type: integer, example: 8 }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Machine-readable code, e.g. VALIDATION_ERROR, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, CONFLICT, BOOKING_CONFLICT, INTERNAL_ERROR
+              example: VALIDATION_ERROR
+            message: { type: string, example: Request validation failed }
+            details:
+              type: array
+              description: Optional field-level or conflict details
+              items: {}
+
+    # ── auth ──
+    RegisterRequest:
+      type: object
+      required: [full_name, email, password]
+      properties:
+        full_name: { type: string, minLength: 2, maxLength: 120 }
+        email: { type: string, format: email, maxLength: 255 }
+        phone: { type: string, maxLength: 32, nullable: true }
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: Plaintext password; hashed with bcrypt server-side. Never returned.
+          writeOnly: true
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, writeOnly: true }
+    AuthTokens:
+      type: object
+      required: [user, access_token, token_type, expires_in]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        access_token: { type: string, description: JWT access token (15–60 min) }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer, description: Access token TTL in seconds, example: 1800 }
+    User:
+      type: object
+      required: [id, full_name, email, role, status, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        full_name: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string, nullable: true }
+        role: { $ref: '#/components/schemas/UserRole' }
+        status: { $ref: '#/components/schemas/UserStatus' }
+        created_at: { type: string, format: date-time }
+
+    # ── halls ──
+    Amenity:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string, example: Stage }
+    Hall:
+      type: object
+      required: [id, name, slug, capacity, base_price, status, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string, example: Riverside Grand Hall }
+        slug: { type: string, example: riverside-grand-hall }
+        description: { type: string, nullable: true }
+        location: { type: string, nullable: true }
+        capacity: { type: integer, minimum: 1 }
+        base_price: { type: string, format: decimal, example: "850.00" }
+        status: { $ref: '#/components/schemas/HallStatus' }
+        cover_image_url: { type: string, format: uri, nullable: true }
+        amenities:
+          type: array
+          items: { type: string }
+          example: [Stage, Sound system, Bridal room]
+        created_at: { type: string, format: date-time }
+    HallDetail:
+      allOf:
+        - $ref: '#/components/schemas/Hall'
+        - type: object
+          properties:
+            images:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: integer, format: int64 }
+                  image_url: { type: string, format: uri }
+                  sort_order: { type: integer }
+            updated_at: { type: string, format: date-time }
+    HallInput:
+      type: object
+      required: [name, capacity, base_price]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 160 }
+        description: { type: string, nullable: true }
+        location: { type: string, maxLength: 255, nullable: true }
+        capacity: { type: integer, minimum: 1 }
+        base_price: { type: number, minimum: 0, example: 850.00 }
+        status: { $ref: '#/components/schemas/HallStatus' }
+        cover_image_url: { type: string, format: uri, maxLength: 512, nullable: true }
+        amenities:
+          type: array
+          description: Amenity names; unknown names are created. Replaces the hall's full amenity set.
+          items: { type: string, maxLength: 80 }
+          example: [Stage, Sound system]
+    HallListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Hall' }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+
+    # ── availability ──
+    BusyRange:
+      type: object
+      required: [start, end, type]
+      properties:
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+        type:
+          type: string
+          enum: [booking, maintenance]
+        booking_id: { type: integer, format: int64, description: Present when type=booking }
+        maintenance_id: { type: integer, format: int64, description: Present when type=maintenance }
+
+    # ── bookings ──
+    Booking:
+      type: object
+      required: [id, booking_ref, hall_id, event_name, event_type, start_at, end_at, status, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        booking_ref: { type: string, example: CH-2026-01042 }
+        user_id: { type: integer, format: int64 }
+        customer_name: { type: string, description: Included on admin views }
+        customer_email: { type: string, format: email, description: Included on admin views }
+        hall_id: { type: integer, format: int64 }
+        hall_name: { type: string }
+        event_name: { type: string }
+        event_type: { type: string, example: wedding }
+        start_at: { type: string, format: date-time }
+        end_at: { type: string, format: date-time }
+        guest_count: { type: integer, nullable: true }
+        quoted_amount: { type: string, format: decimal, nullable: true, example: "850.00" }
+        status: { $ref: '#/components/schemas/BookingStatus' }
+        customer_notes: { type: string, nullable: true }
+        admin_notes: { type: string, nullable: true, description: Admin views only }
+        reviewed_by: { type: integer, format: int64, nullable: true }
+        reviewed_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    BookingDetail:
+      allOf:
+        - $ref: '#/components/schemas/Booking'
+        - type: object
+          properties:
+            events:
+              type: array
+              description: Status-change audit trail (booking_events), oldest first
+              items:
+                type: object
+                properties:
+                  id: { type: integer, format: int64 }
+                  from_status: { type: string, nullable: true }
+                  to_status: { type: string }
+                  note: { type: string, nullable: true }
+                  actor_name: { type: string, nullable: true }
+                  created_at: { type: string, format: date-time }
+    BookingCreate:
+      type: object
+      required: [hall_id, event_name, event_type, start_at, end_at]
+      properties:
+        hall_id: { type: integer, format: int64 }
+        event_name: { type: string, minLength: 2, maxLength: 160 }
+        event_type: { type: string, minLength: 2, maxLength: 64, example: wedding }
+        start_at: { type: string, format: date-time }
+        end_at:
+          type: string
+          format: date-time
+          description: Must be after start_at
+        guest_count: { type: integer, minimum: 1, maximum: 100000, nullable: true }
+        customer_notes: { type: string, maxLength: 2000, nullable: true }
+    BookingListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Booking' }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+    AdminBookingListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Booking' }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+        counts:
+          type: object
+          description: Optional status counts for the applied filters (admin queue badges)
+          properties:
+            pending: { type: integer }
+            approved: { type: integer }
+            rejected: { type: integer }
+            cancelled: { type: integer }
+            completed: { type: integer }
+
+    # ── maintenance ──
+    MaintenanceWindow:
+      type: object
+      required: [id, hall_id, title, start_at, end_at, status, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        hall_id: { type: integer, format: int64 }
+        hall_name: { type: string }
+        title: { type: string }
+        reason: { type: string, nullable: true }
+        start_at: { type: string, format: date-time }
+        end_at: { type: string, format: date-time }
+        status: { $ref: '#/components/schemas/MaintenanceStatus' }
+        created_by: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    MaintenanceInput:
+      type: object
+      required: [hall_id, title, start_at, end_at]
+      properties:
+        hall_id: { type: integer, format: int64 }
+        title: { type: string, minLength: 2, maxLength: 160 }
+        reason: { type: string, maxLength: 2000, nullable: true }
+        start_at: { type: string, format: date-time }
+        end_at:
+          type: string
+          format: date-time
+          description: Must be after start_at
+        status:
+          $ref: '#/components/schemas/MaintenanceStatus'
+          description: On create defaults to `scheduled`; on update, transitions are validated.
+    MaintenanceListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/MaintenanceWindow' }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+
+    # ── dashboard & reports ──
+    DashboardStats:
+      type: object
+      required: [halls, users, bookings]
+      properties:
+        halls:
+          type: object
+          properties:
+            total: { type: integer }
+            active: { type: integer }
+            inactive: { type: integer }
+            maintenance: { type: integer }
+        users:
+          type: object
+          properties:
+            total: { type: integer }
+            customers: { type: integer }
+            admins: { type: integer }
+        bookings:
+          type: object
+          properties:
+            pending: { type: integer }
+            approved: { type: integer }
+            rejected: { type: integer }
+            cancelled: { type: integer }
+            completed: { type: integer }
+        upcoming_approved_bookings: { type: integer, description: Approved bookings starting in the future }
+        pending_requests: { type: integer }
+        active_maintenance_windows: { type: integer, description: scheduled + in_progress windows overlapping now }
+        estimated_revenue:
+          type: string
+          format: decimal
+          description: Sum of quoted_amount for approved bookings in range (not payments)
+    Report:
+      type: object
+      required: [range, totals, breakdown]
+      properties:
+        range:
+          type: object
+          required: [from, to]
+          properties:
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+        totals:
+          type: object
+          properties:
+            bookings: { type: integer }
+            approved: { type: integer }
+            pending: { type: integer }
+            rejected: { type: integer }
+            cancelled: { type: integer }
+            completed: { type: integer }
+            quoted_amount_total: { type: string, format: decimal }
+        breakdown:
+          type: array
+          description: Groups depend on `group_by` — status values, hall ids/names, or YYYY-MM months
+          items:
+            type: object
+            properties:
+              key: { type: string, example: approved }
+              label: { type: string, example: Approved }
+              count: { type: integer }
+              quoted_amount: { type: string, format: decimal }
