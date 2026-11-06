@@ -6,6 +6,7 @@ import { adminHallsRouter } from './routes/adminHalls.js'
 import bookingsRouter from './routes/bookings.js'
 import adminBookingsRouter from './routes/adminBookings.js'
 import adminMaintenanceRouter from './routes/adminMaintenance.js'
+import adminReportsRouter from './routes/adminReports.js'
 import { notFoundHandler, errorHandler } from './middleware/errorHandler.js'
 
 export function createApp() {
@@ -21,6 +22,7 @@ export function createApp() {
   app.use('/api/bookings', bookingsRouter)
   app.use('/api/admin/bookings', adminBookingsRouter)
   app.use('/api/admin/maintenance', adminMaintenanceRouter)
+  app.use('/api/admin', adminReportsRouter)
 
   app.use(notFoundHandler)
   app.use(errorHandler)
