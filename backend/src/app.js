@@ -3,6 +3,8 @@ import cookieParser from 'cookie-parser'
 import { authRouter } from './routes/auth.js'
 import { hallsRouter } from './routes/halls.js'
 import { adminHallsRouter } from './routes/adminHalls.js'
+import bookingsRouter from './routes/bookings.js'
+import adminBookingsRouter from './routes/adminBookings.js'
 import { notFoundHandler, errorHandler } from './middleware/errorHandler.js'
 
 export function createApp() {
@@ -15,6 +17,8 @@ export function createApp() {
   app.use('/api/auth', authRouter)
   app.use('/api/halls', hallsRouter)
   app.use('/api/admin/halls', adminHallsRouter)
+  app.use('/api/bookings', bookingsRouter)
+  app.use('/api/admin/bookings', adminBookingsRouter)
 
   app.use(notFoundHandler)
   app.use(errorHandler)
