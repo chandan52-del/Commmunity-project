@@ -28,3 +28,9 @@ export function dbConfig() {
 export function createPool(overrides = {}) {
   return mysql.createPool({ ...dbConfig(), ...overrides })
 }
+
+let sharedPool = null
+export function getPool() {
+  if (!sharedPool) sharedPool = createPool()
+  return sharedPool
+}

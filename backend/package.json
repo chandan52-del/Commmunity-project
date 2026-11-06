@@ -4,14 +4,20 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
     "migrate": "node src/migrate.js up",
     "migrate:down": "node src/migrate.js down",
     "migrate:status": "node src/migrate.js status",
-    "seed:admin": "node src/seed-admin.js"
+    "seed:admin": "node src/seed-admin.js",
+    "test": "node --test"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
     "dotenv": "^16.3.1",
+    "express": "^4.22.3",
+    "jsonwebtoken": "^9.0.3",
     "mysql2": "^3.11.0"
   }
 }
