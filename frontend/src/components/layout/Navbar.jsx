@@ -13,7 +13,7 @@ const NAV_LINKS = [
 export function Navbar() {
   const [scrolled, setScrolled] = useState(false)
   const [open, setOpen] = useState(false)
-  const { user, isAuthenticated, logout } = useAuth()
+  const { user, isAuthenticated, isAdmin, logout } = useAuth()
   const navigate = useNavigate()
 
   async function onLogout() {
@@ -87,6 +87,17 @@ export function Navbar() {
               >
                 My Bookings
               </Link>
+              {isAdmin && (
+                <Link
+                  to="/admin"
+                  className={cn(
+                    'rounded-md px-4 py-2 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal',
+                    scrolled ? 'text-navy hover:bg-slate-100' : 'text-white hover:bg-white/10',
+                  )}
+                >
+                  Admin
+                </Link>
+              )}
               <span className="max-w-[180px] truncate text-sm font-medium text-navy" title={user.email}>
                 {user.full_name}
               </span>
@@ -169,6 +180,15 @@ export function Navbar() {
                   >
                     My Bookings
                   </Link>
+                  {isAdmin && (
+                    <Link
+                      to="/admin"
+                      onClick={() => setOpen(false)}
+                      className="flex-1 rounded-md border border-slate-300 px-4 py-2.5 text-center text-sm font-semibold text-navy focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal"
+                    >
+                      Admin
+                    </Link>
+                  )}
                   <button
                     type="button"
                     onClick={onLogout}
