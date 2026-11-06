@@ -78,6 +78,15 @@ export function Navbar() {
         <div className="hidden items-center gap-3 lg:flex">
           {isAuthenticated ? (
             <>
+              <Link
+                to="/bookings"
+                className={cn(
+                  'rounded-md px-4 py-2 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal',
+                  scrolled ? 'text-navy hover:bg-slate-100' : 'text-white hover:bg-white/10',
+                )}
+              >
+                My Bookings
+              </Link>
               <span className="max-w-[180px] truncate text-sm font-medium text-navy" title={user.email}>
                 {user.full_name}
               </span>
@@ -153,16 +162,21 @@ export function Navbar() {
             <li className="mt-2 flex gap-3">
               {isAuthenticated ? (
                 <>
-                  <span className="flex-1 truncate px-3 py-2.5 text-sm font-medium text-navy">
-                    {user.full_name}
-                  </span>
+                  <Link
+                    to="/bookings"
+                    onClick={() => setOpen(false)}
+                    className="flex-1 rounded-md border border-slate-300 px-4 py-2.5 text-center text-sm font-semibold text-navy focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal"
+                  >
+                    My Bookings
+                  </Link>
                   <button
                     type="button"
                     onClick={onLogout}
-                    className="flex-1 rounded-md border border-slate-300 px-4 py-2.5 text-center text-sm font-semibold text-navy focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal"
+                    className="flex-1 rounded-md bg-navy px-4 py-2.5 text-center text-sm font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal"
                   >
                     Logout
                   </button>
+                  <span className="w-full truncate px-3 pt-1 text-center text-xs text-slate-400">{user.full_name}</span>
                 </>
               ) : (
                 <>

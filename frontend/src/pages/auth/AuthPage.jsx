@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
 import { ApiError } from '../../services/api'
 
@@ -10,6 +10,7 @@ export function AuthPage({ mode = 'login' }) {
   const isLogin = mode === 'login'
   const { login, register } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
 
   const [form, setForm] = useState({ full_name: '', email: '', phone: '', password: '' })
   const [confirm, setConfirm] = useState('')
@@ -51,8 +52,9 @@ export function AuthPage({ mode = 'login' }) {
           password: form.password,
         })
       }
-      // Admin area does not exist yet — all roles land on the public home page.
-      navigate('/')
+      // Admin area does not exist yet — all roles land on a safe existing route.
+      const from = location.state?.from
+      navigate(from && from.startsWith('/') ? from : '/')
     } catch (err) {
       if (err instanceof ApiError && Array.isArray(err.details)) {
         const map = {}

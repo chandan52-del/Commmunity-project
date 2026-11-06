@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Navbar } from '../../components/layout/Navbar'
 import { Footer } from '../../components/layout/Footer'
 import { fetchHall, fetchAvailability } from '../../services/halls'
+import { createBooking } from '../../services/bookings'
 import { ApiError } from '../../services/api'
+import { useAuth } from '../../context/AuthContext'
 
 const inputCls =
   'w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-navy focus:border-teal focus:outline-none focus:ring-2 focus:ring-teal/30'
@@ -28,6 +30,8 @@ function toISOUTC(dateStr) {
 
 export function HallDetailsPage() {
   const { id } = useParams()
+  const navigate = useNavigate()
+  const { isAuthenticated, status: authStatus } = useAuth()
   const [hall, setHall] = useState(null)
   const [images, setImages] = useState([])
   const [status, setStatus] = useState('loading') // loading | ready | notfound | error
@@ -38,6 +42,15 @@ export function HallDetailsPage() {
   const [availability, setAvailability] = useState(null)
   const [availLoading, setAvailLoading] = useState(false)
   const [availError, setAvailError] = useState(null)
+
+  const [bookingForm, setBookingForm] = useState({
+    event_name: '', event_type: 'wedding', date: '', start_time: '', end_time: '',
+    guest_count: '', customer_notes: '',
+  })
+  const [bookingLoading, setBookingLoading] = useState(false)
+  const [bookingError, setBookingError] = useState(null)
+  const [bookingFieldErrors, setBookingFieldErrors] = useState({})
+  const [bookingSuccess, setBookingSuccess] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -148,6 +161,56 @@ export function HallDetailsPage() {
   }
 
   const busy = availability?.busy_ranges ?? []
+
+  const setB = (k) => (e) => setBookingForm((f) => ({ ...f, [k]: e.target.value }))
+
+  async function submitBooking(e) {
+    e.preventDefault()
+    if (bookingLoading) return
+    setBookingError(null)
+    setBookingFieldErrors({})
+
+    const fe = {}
+    if (bookingForm.event_name.trim().length < 2) fe.event_name = 'Event name is required (min 2 characters)'
+    if (!bookingForm.date) fe.date = 'Date is required'
+    if (!bookingForm.start_time) fe.start_time = 'Start time is required'
+    if (!bookingForm.end_time) fe.end_time = 'End time is required'
+    if (bookingForm.guest_count && (!Number.isInteger(Number(bookingForm.guest_count)) || Number(bookingForm.guest_count) < 1)) {
+      fe.guest_count = 'Guest count must be a positive whole number'
+    }
+    if (Object.values(fe).some(Boolean)) { setBookingFieldErrors(fe); return }
+
+    const startAt = new Date(`${bookingForm.date}T${bookingForm.start_time}`).toISOString()
+    const endAt = new Date(`${bookingForm.date}T${bookingForm.end_time}`).toISOString()
+    if (new Date(endAt) <= new Date(startAt)) {
+      setBookingFieldErrors({ end_time: 'End time must be after start time' })
+      return
+    }
+
+    setBookingLoading(true)
+    try {
+      const res = await createBooking({
+        hall_id: hall.id,
+        event_name: bookingForm.event_name.trim(),
+        event_type: bookingForm.event_type.trim(),
+        start_at: startAt,
+        end_at: endAt,
+        guest_count: bookingForm.guest_count ? Number(bookingForm.guest_count) : null,
+        customer_notes: bookingForm.customer_notes.trim() || null,
+      })
+      setBookingSuccess(res.data)
+      setTimeout(() => navigate('/bookings'), 2000)
+    } catch (err) {
+      if (err instanceof ApiError && Array.isArray(err.details)) {
+        const map = {}
+        for (const d of err.details) if (d.field && !map[d.field]) map[d.field] = d.message
+        setBookingFieldErrors(map)
+      }
+      setBookingError(err?.message ?? 'Could not submit booking request.')
+    } finally {
+      setBookingLoading(false)
+    }
+  }
 
   return (
     <>
@@ -286,6 +349,114 @@ export function HallDetailsPage() {
                   when a booking request is approved.
                 </p>
               </div>
+            )}
+          </section>
+
+          <section className="mt-8 rounded-card border border-slate-200 bg-white p-6 shadow-card sm:p-8">
+            <h2 className="text-xl font-bold tracking-tight text-navy">Request a booking</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Submit a request — an administrator reviews it before confirmation.
+            </p>
+
+            {bookingSuccess ? (
+              <div className="mt-5 rounded-lg border border-emerald-200 bg-emerald-50 p-4">
+                <p className="font-semibold text-emerald-800">Booking request submitted!</p>
+                <p className="mt-1 text-sm text-emerald-700">
+                  Reference <span className="font-mono font-bold">{bookingSuccess.booking_ref}</span> —
+                  redirecting to My Bookings…
+                </p>
+                <Link to="/bookings" className="mt-3 inline-block text-sm font-semibold text-teal hover:text-teal-400">
+                  Go to My Bookings →
+                </Link>
+              </div>
+            ) : authStatus === 'loading' ? (
+              <p className="mt-5 text-sm text-slate-400">Loading…</p>
+            ) : !isAuthenticated ? (
+              <div className="mt-5 rounded-lg border border-dashed border-slate-300 bg-page p-5 text-center">
+                <p className="text-sm text-slate-600">Sign in to request a booking for this hall.</p>
+                <Link
+                  to="/login"
+                  state={{ from: `/halls/${id}` }}
+                  className="mt-3 inline-block rounded-md bg-teal px-5 py-2.5 text-sm font-semibold text-white hover:bg-teal-400"
+                >
+                  Login to continue
+                </Link>
+              </div>
+            ) : (
+              <form onSubmit={submitBooking} className="mt-5 grid gap-4 sm:grid-cols-2">
+                <div className="sm:col-span-2">
+                  <label htmlFor="bk-name" className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Event name <span className="text-red-500">*</span>
+                  </label>
+                  <input id="bk-name" type="text" value={bookingForm.event_name} onChange={setB('event_name')}
+                    placeholder="e.g. Sharma Wedding Reception" className={inputCls} />
+                  {bookingFieldErrors.event_name && <p className="mt-1 text-xs text-red-600">{bookingFieldErrors.event_name}</p>}
+                </div>
+                <div>
+                  <label htmlFor="bk-type" className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Event type <span className="text-red-500">*</span>
+                  </label>
+                  <input id="bk-type" type="text" value={bookingForm.event_type} onChange={setB('event_type')} className={inputCls} />
+                  {bookingFieldErrors.event_type && <p className="mt-1 text-xs text-red-600">{bookingFieldErrors.event_type}</p>}
+                </div>
+                <div>
+                  <label htmlFor="bk-guests" className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Guests (optional, max {hall.capacity})
+                  </label>
+                  <input id="bk-guests" type="number" min="1" max={hall.capacity} value={bookingForm.guest_count} onChange={setB('guest_count')} className={inputCls} />
+                  {bookingFieldErrors.guest_count && <p className="mt-1 text-xs text-red-600">{bookingFieldErrors.guest_count}</p>}
+                </div>
+                <div>
+                  <label htmlFor="bk-date" className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Date <span className="text-red-500">*</span>
+                  </label>
+                  <input id="bk-date" type="date" value={bookingForm.date} onChange={setB('date')} className={inputCls} />
+                  {bookingFieldErrors.date && <p className="mt-1 text-xs text-red-600">{bookingFieldErrors.date}</p>}
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label htmlFor="bk-start" className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Start <span className="text-red-500">*</span>
+                    </label>
+                    <input id="bk-start" type="time" value={bookingForm.start_time} onChange={setB('start_time')} className={inputCls} />
+                    {bookingFieldErrors.start_time && <p className="mt-1 text-xs text-red-600">{bookingFieldErrors.start_time}</p>}
+                  </div>
+                  <div>
+                    <label htmlFor="bk-end" className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      End <span className="text-red-500">*</span>
+                    </label>
+                    <input id="bk-end" type="time" value={bookingForm.end_time} onChange={setB('end_time')} className={inputCls} />
+                    {bookingFieldErrors.end_time && <p className="mt-1 text-xs text-red-600">{bookingFieldErrors.end_time}</p>}
+                  </div>
+                </div>
+                <div className="sm:col-span-2">
+                  <label htmlFor="bk-notes" className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Notes (optional)
+                  </label>
+                  <textarea id="bk-notes" rows={3} maxLength={2000} value={bookingForm.customer_notes} onChange={setB('customer_notes')} className={inputCls} />
+                  {bookingFieldErrors.customer_notes && <p className="mt-1 text-xs text-red-600">{bookingFieldErrors.customer_notes}</p>}
+                </div>
+
+                {bookingError && (
+                  <p role="alert" className="sm:col-span-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {bookingError}
+                    {bookingError.includes('overlaps') && ' — try different dates or times.'}
+                  </p>
+                )}
+
+                <div className="sm:col-span-2">
+                  <button
+                    type="submit"
+                    disabled={bookingLoading}
+                    className="rounded-md bg-teal px-6 py-3 text-sm font-semibold text-white transition-colors hover:bg-teal-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal disabled:opacity-60"
+                  >
+                    {bookingLoading ? 'Submitting…' : 'Submit booking request'}
+                  </button>
+                  <p className="mt-2 text-xs text-slate-400">
+                    Requests with status "pending" do not block the hall until approved.
+                  </p>
+                </div>
+              </form>
             )}
           </section>
         </div>
