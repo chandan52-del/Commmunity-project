@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { cn } from '../../utils/cn'
+import { useAuth } from '../../context/AuthContext'
 
 const NAV_LINKS = [
   { label: 'Home', href: '#home' },
@@ -12,6 +13,14 @@ const NAV_LINKS = [
 export function Navbar() {
   const [scrolled, setScrolled] = useState(false)
   const [open, setOpen] = useState(false)
+  const { user, isAuthenticated, logout } = useAuth()
+  const navigate = useNavigate()
+
+  async function onLogout() {
+    await logout()
+    setOpen(false)
+    navigate('/')
+  }
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 24)
@@ -67,23 +76,43 @@ export function Navbar() {
         </ul>
 
         <div className="hidden items-center gap-3 lg:flex">
-          <Link
-            to="/login"
-            className={cn(
-              'rounded-md px-4 py-2 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal',
-              scrolled
-                ? 'text-navy hover:bg-slate-100'
-                : 'text-white hover:bg-white/10',
-            )}
-          >
-            Login
-          </Link>
-          <Link
-            to="/get-started"
-            className="rounded-md bg-teal px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-teal-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal focus-visible:ring-offset-2"
-          >
-            Get Started
-          </Link>
+          {isAuthenticated ? (
+            <>
+              <span className="max-w-[180px] truncate text-sm font-medium text-navy" title={user.email}>
+                {user.full_name}
+              </span>
+              <button
+                type="button"
+                onClick={onLogout}
+                className={cn(
+                  'rounded-md px-4 py-2 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal',
+                  scrolled ? 'text-navy hover:bg-slate-100' : 'text-white hover:bg-white/10',
+                )}
+              >
+                Logout
+              </button>
+            </>
+          ) : (
+            <>
+              <Link
+                to="/login"
+                className={cn(
+                  'rounded-md px-4 py-2 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal',
+                  scrolled
+                    ? 'text-navy hover:bg-slate-100'
+                    : 'text-white hover:bg-white/10',
+                )}
+              >
+                Login
+              </Link>
+              <Link
+                to="/get-started"
+                className="rounded-md bg-teal px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-teal-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal focus-visible:ring-offset-2"
+              >
+                Get Started
+              </Link>
+            </>
+          )}
         </div>
 
         <button
@@ -122,20 +151,37 @@ export function Navbar() {
               </li>
             ))}
             <li className="mt-2 flex gap-3">
-              <Link
-                to="/login"
-                onClick={() => setOpen(false)}
-                className="flex-1 rounded-md border border-slate-300 px-4 py-2.5 text-center text-sm font-semibold text-navy focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal"
-              >
-                Login
-              </Link>
-              <Link
-                to="/get-started"
-                onClick={() => setOpen(false)}
-                className="flex-1 rounded-md bg-teal px-4 py-2.5 text-center text-sm font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal"
-              >
-                Get Started
-              </Link>
+              {isAuthenticated ? (
+                <>
+                  <span className="flex-1 truncate px-3 py-2.5 text-sm font-medium text-navy">
+                    {user.full_name}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={onLogout}
+                    className="flex-1 rounded-md border border-slate-300 px-4 py-2.5 text-center text-sm font-semibold text-navy focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal"
+                  >
+                    Logout
+                  </button>
+                </>
+              ) : (
+                <>
+                  <Link
+                    to="/login"
+                    onClick={() => setOpen(false)}
+                    className="flex-1 rounded-md border border-slate-300 px-4 py-2.5 text-center text-sm font-semibold text-navy focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal"
+                  >
+                    Login
+                  </Link>
+                  <Link
+                    to="/get-started"
+                    onClick={() => setOpen(false)}
+                    className="flex-1 rounded-md bg-teal px-4 py-2.5 text-center text-sm font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal"
+                  >
+                    Get Started
+                  </Link>
+                </>
+              )}
             </li>
           </ul>
         </div>

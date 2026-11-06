@@ -8,10 +8,12 @@ import adminBookingsRouter from './routes/adminBookings.js'
 import adminMaintenanceRouter from './routes/adminMaintenance.js'
 import adminReportsRouter from './routes/adminReports.js'
 import { notFoundHandler, errorHandler } from './middleware/errorHandler.js'
+import { corsMiddleware } from './middleware/cors.js'
 
 export function createApp() {
   const app = express()
   app.disable('x-powered-by')
+  app.use(corsMiddleware)
   app.use(express.json({ limit: '100kb' }))
   app.use(cookieParser())
 
