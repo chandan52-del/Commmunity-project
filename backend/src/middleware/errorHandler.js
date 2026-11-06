@@ -34,6 +34,13 @@ export function errorHandler(err, req, res, next) {
     })
   }
 
+  // MySQL duplicate-key → contract 409 CONFLICT (e.g. unique slug race)
+  if (err.code === 'ER_DUP_ENTRY') {
+    return res.status(409).json({
+      error: { code: 'CONFLICT', message: 'Resource already exists' },
+    })
+  }
+
   // Body-parser JSON errors
   if (err.type === 'entity.parse.failed') {
     return res.status(400).json({

@@ -10,7 +10,7 @@
     "migrate:down": "node src/migrate.js down",
     "migrate:status": "node src/migrate.js status",
     "seed:admin": "node src/seed-admin.js",
-    "test": "node --test"
+    "test": "node --test --test-concurrency=1"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
