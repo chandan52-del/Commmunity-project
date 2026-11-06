@@ -136,9 +136,23 @@ paths:
     post:
       tags: [Auth]
       summary: Rotate refresh token and issue a new access token
-      description: Reads the `refresh_token` HttpOnly cookie, validates it, rotates it (old token revoked), and returns a new access token. No request body.
+      description: |
+        Reads the `refresh_token` HttpOnly cookie (see `refreshCookie` security
+        scheme), validates it, rotates it — the presented token is revoked and a
+        new one is issued via `Set-Cookie` — and returns a new access token.
+        No request body.
+
+        **Reuse detection:** if a refresh token is presented after it has already
+        been rotated (i.e. token reuse, which may indicate theft), the server
+        revokes the entire token family for that user and returns `401`. Clients
+        must then re-authenticate via `/auth/login`.
+
+        **Cookie behavior:** `HttpOnly; Secure; SameSite=Strict; Path=/api/auth`.
+        The cookie expires with the refresh-token TTL (e.g. 30 days sliding);
+        every successful refresh resets expiry. On logout the cookie is cleared
+        (`Max-Age=0`) and the token revoked server-side.
       operationId: refreshToken
-      security: []
+      security: [{ refreshCookie: [] }]
       responses:
         '200':
           description: New access token issued; new refresh cookie set
@@ -166,8 +180,13 @@ paths:
     post:
       tags: [Auth]
       summary: Log out — revoke refresh token and clear cookie
+      description: |
+        Revokes the refresh token presented in the `refresh_token` cookie and
+        clears it via `Set-Cookie` (`Max-Age=0; HttpOnly; Secure; SameSite=Strict;
+        Path=/api/auth`). Idempotent — always returns 204 even if the cookie is
+        absent or already revoked. Access tokens remain valid until expiry.
       operationId: logout
-      security: []
+      security: [{ refreshCookie: [] }]
       responses:
         '204': { description: Logged out; refresh cookie cleared via Set-Cookie }
         '500': { $ref: '#/components/responses/InternalError' }
@@ -307,6 +326,7 @@ paths:
     patch:
       tags: [Admin Halls]
       summary: Update a hall (admin)
+      description: Partial update — only supplied fields change; the merged resource is validated before persisting.
       operationId: updateHall
       security: [{ bearerAuth: [] }]
       x-required-role: admin
@@ -319,7 +339,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/HallInput' }
+            schema: { $ref: '#/components/schemas/HallPatch' }
       responses:
         '200':
           description: Hall updated
@@ -534,6 +554,7 @@ paths:
                 required: [data]
                 properties:
                   data: { $ref: '#/components/schemas/BookingDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -627,11 +648,23 @@ paths:
       tags: [Admin Bookings]
       summary: Approve a pending booking (admin)
       description: |
-        Sets status `pending → approved`. Inside a MySQL transaction with row
-        locking, the server re-checks overlaps against `approved` bookings and
-        `scheduled`/`in_progress` maintenance. On conflict the transaction
-        rolls back and returns `409 BOOKING_CONFLICT` with conflict details.
-        Only `pending` bookings may be approved (409 otherwise).
+        Sets status `pending → approved`. Concurrency protocol (InnoDB):
+
+        1. `START TRANSACTION`
+        2. `SELECT ... FOR UPDATE` on the **hall row** (`halls.id = booking.hall_id`).
+           This row lock serializes all approval attempts for that hall — two
+           concurrent approvals for the same hall cannot interleave.
+        3. With the lock held, re-check overlaps against `approved` bookings and
+           `scheduled`/`in_progress` maintenance windows on the same hall
+           (half-open `[start_at, end_at)`).
+        4. If clear: set `status=approved`, write `booking_events` audit row,
+           `COMMIT`. If conflict: `ROLLBACK` and return `409 BOOKING_CONFLICT`
+           with conflict details.
+
+        Because the hall row is locked before the overlap check, simultaneous
+        approval requests for overlapping ranges on the same hall are resolved
+        sequentially — at most one can succeed. Only `pending` bookings may be
+        approved (409 `CONFLICT` otherwise).
       operationId: approveBooking
       security: [{ bearerAuth: [] }]
       x-required-role: admin
@@ -745,7 +778,15 @@ paths:
     post:
       tags: [Maintenance]
       summary: Schedule a maintenance window (admin)
-      description: Creating a `scheduled` or `in_progress` window that overlaps approved bookings is allowed but is flagged via `conflicts` in the response; the admin should review. Returns 409 only if `hall_id` does not exist.
+      description: |
+        Creates a maintenance window. A window in `scheduled` or `in_progress`
+        status **must not overlap** any `approved` booking on the same hall
+        (half-open `[start_at, end_at)`). If it does, the request is rejected
+        with `409 BOOKING_CONFLICT` and conflict details — inside a transaction
+        that takes the same hall row lock (`SELECT ... FOR UPDATE`) used by
+        booking approval, so maintenance and approvals cannot race.
+        `completed`/`cancelled` windows may overlap freely. Returns 404 if
+        `hall_id` does not exist.
       operationId: createMaintenance
       security: [{ bearerAuth: [] }]
       x-required-role: admin
@@ -775,13 +816,32 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/BookingConflict' }
         '500': { $ref: '#/components/responses/InternalError' }
 
   /admin/maintenance/{id}:
     patch:
       tags: [Maintenance]
       summary: Update or transition a maintenance window (admin)
-      description: Allowed transitions — `scheduled → in_progress → completed`, any non-terminal state → `cancelled`. Overlapping an approved booking when moving to `scheduled`/`in_progress` returns 409.
+      description: |
+        Partial update — only supplied fields change; the resulting resource is
+        validated as a whole. Allowed status transitions:
+        `scheduled → in_progress → completed`, and any non-terminal state →
+        `cancelled` (invalid transitions return `409 CONFLICT`).
+
+        Whenever the update results in `scheduled` or `in_progress` status —
+        including changes to `hall_id`, `start_at`, or `end_at` — the same
+        overlap rule as creation applies: no overlap with `approved` bookings
+        on the target hall, checked inside a transaction with row locking.
+        Violations return `409 BOOKING_CONFLICT` with details.
+
+        **Locking:** when `hall_id` changes, the transaction locks **both** the
+        existing hall row and the destination hall row with `SELECT ... FOR
+        UPDATE`. Locks are always acquired in ascending hall-ID order so that
+        concurrent updates moving windows in opposite directions cannot
+        deadlock. The approved-booking overlap check runs while holding the
+        relevant hall lock(s), and the transaction commits or rolls back as a
+        unit — a conflict anywhere aborts the entire update.
       operationId: updateMaintenance
       security: [{ bearerAuth: [] }]
       x-required-role: admin
@@ -794,7 +854,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/MaintenanceInput' }
+            schema: { $ref: '#/components/schemas/MaintenancePatch' }
       responses:
         '200':
           description: Maintenance window updated
@@ -809,7 +869,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409': { $ref: '#/components/responses/Conflict' }
+        '409': { $ref: '#/components/responses/BookingConflict' }
         '500': { $ref: '#/components/responses/InternalError' }
     delete:
       tags: [Maintenance]
@@ -943,7 +1003,14 @@ components:
       type: apiKey
       in: cookie
       name: refresh_token
-      description: HttpOnly, Secure, SameSite=Strict refresh token cookie. Rotated on every `/auth/refresh` call; never exposed in response bodies.
+      description: |
+        HttpOnly refresh token cookie, set by `/auth/register`, `/auth/login`,
+        and rotated by `/auth/refresh`. Attributes:
+        `HttpOnly; Secure; SameSite=Strict; Path=/api/auth`.
+        Refresh-token TTL ~30 days (sliding — reset on each rotation). The token
+        is single-use: presenting an already-rotated token revokes the whole
+        session family (reuse detection). Cleared on `/auth/logout`. Never
+        appears in response bodies or client-accessible storage.
 
   parameters:
     Page:
@@ -1159,6 +1226,27 @@ components:
           description: Amenity names; unknown names are created. Replaces the hall's full amenity set.
           items: { type: string, maxLength: 80 }
           example: [Stage, Sound system]
+    HallPatch:
+      type: object
+      description: |
+        Partial update for `PATCH /admin/halls/{id}` — every field is optional;
+        only supplied fields are changed. At least one field must be present.
+        The merged result is validated against the same rules as `HallInput`
+        (e.g. `capacity >= 1`, `base_price >= 0`, `end`-independent constraints)
+        before persisting; invalid merged state returns 400.
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 2, maxLength: 160 }
+        description: { type: string, nullable: true }
+        location: { type: string, maxLength: 255, nullable: true }
+        capacity: { type: integer, minimum: 1 }
+        base_price: { type: number, minimum: 0, example: 850.00 }
+        status: { $ref: '#/components/schemas/HallStatus' }
+        cover_image_url: { type: string, format: uri, maxLength: 512, nullable: true }
+        amenities:
+          type: array
+          description: When supplied, replaces the hall's full amenity set (same semantics as create).
+          items: { type: string, maxLength: 80 }
     HallListResponse:
       type: object
       required: [data, pagination]
@@ -1294,6 +1382,22 @@ components:
         status:
           $ref: '#/components/schemas/MaintenanceStatus'
           description: On create defaults to `scheduled`; on update, transitions are validated.
+    MaintenancePatch:
+      type: object
+      description: |
+        Partial update for `PATCH /admin/maintenance/{id}` — every field is
+        optional; only supplied fields change. At least one field must be
+        present. The merged resource is validated as a whole (`end_at >
+        start_at`, valid status transition, overlap rules when the result is
+        `scheduled`/`in_progress`) before persisting.
+      minProperties: 1
+      properties:
+        hall_id: { type: integer, format: int64 }
+        title: { type: string, minLength: 2, maxLength: 160 }
+        reason: { type: string, maxLength: 2000, nullable: true }
+        start_at: { type: string, format: date-time }
+        end_at: { type: string, format: date-time }
+        status: { $ref: '#/components/schemas/MaintenanceStatus' }
     MaintenanceListResponse:
       type: object
       required: [data, pagination]
