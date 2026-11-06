@@ -1,25 +1,50 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { SAMPLE_HALLS } from '../../data/sampleHalls'
+import { fetchHalls } from '../../services/halls'
+import { ApiError } from '../../services/api'
 
-function HallCard({ hall, onViewDetails }) {
+const PAGE_SIZE = 12
+
+function formatPrice(basePrice) {
+  if (basePrice === null || basePrice === undefined) return 'Price on request'
+  const n = Number(basePrice)
+  return Number.isFinite(n) ? `From $${n.toLocaleString()}` : 'Price on request'
+}
+
+function HallImage({ hall, className }) {
+  if (hall.cover_image_url) {
+    return (
+      <img
+        src={hall.cover_image_url}
+        alt={`${hall.name} — event venue in ${hall.location ?? 'community'}`}
+        loading="lazy"
+        className={className}
+      />
+    )
+  }
+  return (
+    <div
+      className={`${className} flex items-center justify-center bg-gradient-to-br from-navy to-teal/70`}
+      aria-hidden="true"
+    >
+      <span className="text-4xl font-bold text-white/80">{hall.name?.charAt(0) ?? 'H'}</span>
+    </div>
+  )
+}
+
+function HallCard({ hall }) {
   return (
     <article className="group flex flex-col overflow-hidden rounded-card border border-slate-200 bg-white shadow-card transition-shadow duration-300 hover:shadow-[0_16px_40px_rgba(11,31,58,0.12)]">
-      <div className="relative aspect-[4/3] overflow-hidden">
-        <img
-          src={hall.image}
-          alt={`${hall.name} — event venue in ${hall.location}`}
-          loading="lazy"
+      <Link to={`/halls/${hall.slug || hall.id}`} className="relative block aspect-[4/3] overflow-hidden">
+        <HallImage
+          hall={hall}
           className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.04]"
         />
-        <span className="absolute left-3 top-3 rounded-full bg-white/90 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-navy backdrop-blur-sm">
-          Sample listing
-        </span>
-      </div>
+      </Link>
 
       <div className="flex flex-1 flex-col p-5">
         <h3 className="text-lg font-bold tracking-tight text-navy">{hall.name}</h3>
-        <p className="mt-1 text-sm text-slate-500">{hall.location}</p>
+        <p className="mt-1 text-sm text-slate-500">{hall.location ?? 'Location TBD'}</p>
 
         <dl className="mt-4 flex items-center gap-5 text-sm text-slate-600">
           <div className="flex items-center gap-1.5">
@@ -29,139 +54,91 @@ function HallCard({ hall, onViewDetails }) {
             <dt className="sr-only">Capacity</dt>
             <dd>Up to {hall.capacity} guests</dd>
           </div>
+          <div className="flex items-center gap-1.5">
+            <dt className="sr-only">Price</dt>
+            <dd className="font-semibold text-navy">{formatPrice(hall.base_price)}</dd>
+          </div>
         </dl>
 
         <p className="mt-3 line-clamp-2 text-sm leading-relaxed text-slate-500">
-          {hall.description}
+          {hall.description ?? 'A community venue available for events and gatherings.'}
         </p>
 
-        <button
-          type="button"
-          onClick={() => onViewDetails(hall)}
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {(hall.amenities ?? []).slice(0, 4).map((amenity) => (
+            <span key={amenity} className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-medium text-slate-600">
+              {amenity}
+            </span>
+          ))}
+        </div>
+
+        <Link
+          to={`/halls/${hall.slug || hall.id}`}
           className="mt-5 self-start rounded-md border border-navy/15 px-4 py-2 text-sm font-semibold text-navy transition-colors hover:border-teal hover:text-teal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal"
         >
           View Details
-        </button>
+        </Link>
       </div>
     </article>
   )
 }
 
-function HallDetailsModal({ hall, onClose }) {
-  useEffect(() => {
-    const onKeyDown = (event) => {
-      if (event.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', onKeyDown)
-    document.body.style.overflow = 'hidden'
-    return () => {
-      document.removeEventListener('keydown', onKeyDown)
-      document.body.style.overflow = ''
-    }
-  }, [onClose])
-
-  if (!hall) return null
-
-  return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-navy/60 p-4 backdrop-blur-sm"
-      onClick={onClose}
-      role="presentation"
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="hall-details-title"
-        className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-card bg-white shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="relative aspect-[16/9]">
-          <img src={hall.image} alt="" className="h-full w-full object-cover" />
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close details"
-            className="absolute right-3 top-3 flex h-9 w-9 items-center justify-center rounded-full bg-white/90 text-navy shadow-sm transition-colors hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal"
-          >
-            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-              <path strokeLinecap="round" d="M6 6l12 12M18 6L6 18" />
-            </svg>
-          </button>
-        </div>
-
-        <div className="p-6">
-          <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-            Sample listing
-          </span>
-          <h3 id="hall-details-title" className="mt-3 text-2xl font-bold tracking-tight text-navy">
-            {hall.name}
-          </h3>
-          <p className="mt-1 text-sm text-slate-500">{hall.location}</p>
-
-          <p className="mt-4 text-sm leading-relaxed text-slate-600">{hall.description}</p>
-
-          <dl className="mt-5 grid grid-cols-2 gap-4 rounded-lg bg-page p-4 text-sm">
-            <div>
-              <dt className="text-xs font-semibold uppercase tracking-wide text-slate-400">Capacity</dt>
-              <dd className="mt-1 font-semibold text-navy">Up to {hall.capacity} guests</dd>
-            </div>
-            <div>
-              <dt className="text-xs font-semibold uppercase tracking-wide text-slate-400">Pricing</dt>
-              <dd className="mt-1 font-semibold text-navy">On request</dd>
-            </div>
-          </dl>
-
-          <div className="mt-5">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Amenities</p>
-            <ul className="mt-2 flex flex-wrap gap-2">
-              {hall.amenities.map((amenity) => (
-                <li
-                  key={amenity}
-                  className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-600"
-                >
-                  {amenity}
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <div className="mt-6 flex gap-3">
-            <Link
-              to="/get-started"
-              onClick={onClose}
-              className="flex-1 rounded-md bg-teal px-4 py-2.5 text-center text-sm font-semibold text-white transition-colors hover:bg-teal-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal"
-            >
-              Request Booking
-            </Link>
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-md border border-slate-300 px-4 py-2.5 text-sm font-semibold text-navy transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal"
-            >
-              Close
-            </button>
-          </div>
-          <p className="mt-3 text-center text-xs text-slate-400">
-            Booking requests are reviewed by an administrator before confirmation.
-          </p>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 export function FeaturedHalls({ filters }) {
-  const [selected, setSelected] = useState(null)
+  const [halls, setHalls] = useState([])
+  const [pagination, setPagination] = useState({ page: 1, total_pages: 1, total: 0 })
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [page, setPage] = useState(1)
 
-  const visibleHalls = SAMPLE_HALLS.filter((hall) => {
-    if (filters.location && !hall.location.toLowerCase().includes(filters.location.toLowerCase())) {
-      return false
+  const location = filters?.location?.trim() || undefined
+  const maxCapacity = filters?.guests ? Number(filters.guests) : undefined
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    setPage(1)
+    fetchHalls({
+      page: 1,
+      pageSize: PAGE_SIZE,
+      location,
+      maxCapacity: Number.isFinite(maxCapacity) ? maxCapacity : undefined,
+    })
+      .then((res) => {
+        if (cancelled) return
+        setHalls(res.data ?? [])
+        setPagination(res.pagination ?? { page: 1, total_pages: 1, total: 0 })
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setError(err instanceof ApiError ? err.message : 'Could not load halls. Please try again.')
+        setHalls([])
+      })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location, maxCapacity])
+
+  async function goToPage(next) {
+    if (next < 1 || next > pagination.total_pages || next === pagination.page) return
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await fetchHalls({
+        page: next,
+        pageSize: PAGE_SIZE,
+        location,
+        maxCapacity: Number.isFinite(maxCapacity) ? maxCapacity : undefined,
+      })
+      setHalls(res.data ?? [])
+      setPagination(res.pagination)
+      setPage(next)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not load halls. Please try again.')
+    } finally {
+      setLoading(false)
     }
-    if (filters.guests && hall.capacity > Number(filters.guests)) {
-      return false
-    }
-    return true
-  })
+  }
 
   return (
     <section id="halls" className="scroll-mt-20 bg-page px-5 py-20 sm:px-8">
@@ -172,12 +149,36 @@ export function FeaturedHalls({ filters }) {
             Featured Community Halls
           </h2>
           <p className="mt-4 text-slate-600">
-            A curated selection of venues for every kind of gathering. Listings below are sample
-            content for preview — live availability will connect to the booking API.
+            A curated selection of venues for every kind of gathering. Live listings from the
+            community hall catalogue.
           </p>
         </div>
 
-        {visibleHalls.length === 0 ? (
+        {loading ? (
+          <div className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-3" aria-label="Loading halls">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="animate-pulse overflow-hidden rounded-card border border-slate-200 bg-white">
+                <div className="aspect-[4/3] bg-slate-200" />
+                <div className="space-y-3 p-5">
+                  <div className="h-5 w-2/3 rounded bg-slate-200" />
+                  <div className="h-4 w-1/3 rounded bg-slate-200" />
+                  <div className="h-4 w-full rounded bg-slate-200" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : error ? (
+          <div className="mt-12 rounded-card border border-red-200 bg-red-50 p-10 text-center">
+            <p className="font-semibold text-red-700">{error}</p>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="mt-3 rounded-md border border-red-300 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-100"
+            >
+              Try again
+            </button>
+          </div>
+        ) : halls.length === 0 ? (
           <div className="mt-12 rounded-card border border-dashed border-slate-300 bg-white p-10 text-center">
             <p className="font-semibold text-navy">No halls match your search.</p>
             <p className="mt-1 text-sm text-slate-500">
@@ -185,15 +186,38 @@ export function FeaturedHalls({ filters }) {
             </p>
           </div>
         ) : (
-          <div className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-            {visibleHalls.map((hall) => (
-              <HallCard key={hall.id} hall={hall} onViewDetails={setSelected} />
-            ))}
-          </div>
+          <>
+            <div className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+              {halls.map((hall) => (
+                <HallCard key={hall.id} hall={hall} />
+              ))}
+            </div>
+            {pagination.total_pages > 1 && (
+              <nav className="mt-8 flex items-center justify-center gap-3" aria-label="Hall pages">
+                <button
+                  type="button"
+                  onClick={() => goToPage(page - 1)}
+                  disabled={page <= 1}
+                  className="rounded-md border border-slate-300 px-4 py-2 text-sm font-semibold text-navy hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Previous
+                </button>
+                <span className="text-sm text-slate-500">
+                  Page {page} of {pagination.total_pages} · {pagination.total} halls
+                </span>
+                <button
+                  type="button"
+                  onClick={() => goToPage(page + 1)}
+                  disabled={page >= pagination.total_pages}
+                  className="rounded-md border border-slate-300 px-4 py-2 text-sm font-semibold text-navy hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Next
+                </button>
+              </nav>
+            )}
+          </>
         )}
       </div>
-
-      <HallDetailsModal hall={selected} onClose={() => setSelected(null)} />
     </section>
   )
 }
