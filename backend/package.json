@@ -1,0 +1,17 @@
+{
+  "name": "community-hall-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "migrate": "node src/migrate.js up",
+    "migrate:down": "node src/migrate.js down",
+    "migrate:status": "node src/migrate.js status",
+    "seed:admin": "node src/seed-admin.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.3.1",
+    "mysql2": "^3.11.0"
+  }
+}
